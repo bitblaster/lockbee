@@ -1,0 +1,14 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "tmc2209.c"
+        "lock_motor.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        driver
+        esp_timer
+        console
+        log
+        nvs_flash
+)

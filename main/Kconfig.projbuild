@@ -1,0 +1,156 @@
+menu "LockBee Configuration"
+
+    menu "GPIO Pin Assignments"
+
+        config LOCKBEE_STEP_GPIO
+            int "TMC2209 STEP GPIO"
+            range 0 30
+            default 9
+            help
+                GPIO number connected to TMC2209 STEP pin.
+
+        config LOCKBEE_DIR_GPIO
+            int "TMC2209 DIR GPIO"
+            range 0 30
+            default 10
+            help
+                GPIO number connected to TMC2209 DIR pin.
+
+        config LOCKBEE_EN_GPIO
+            int "TMC2209 EN GPIO (active LOW)"
+            range 0 30
+            default 11
+            help
+                GPIO number connected to TMC2209 EN pin (active LOW to enable).
+
+        config LOCKBEE_UART_TX_GPIO
+            int "TMC2209 PDN_UART TX GPIO"
+            range 0 30
+            default 12
+            help
+                GPIO number connected to TMC2209 PDN_UART pin (TX side).
+                Connect TX->RX via 1kΩ resistor for single-wire UART.
+
+        config LOCKBEE_UART_RX_GPIO
+            int "TMC2209 PDN_UART RX GPIO"
+            range 0 30
+            default 13
+            help
+                GPIO number connected to TMC2209 PDN_UART pin (RX side, looped from TX).
+
+        config LOCKBEE_DIAG_GPIO
+            int "TMC2209 DIAG GPIO (StallGuard output)"
+            range 0 30
+            default 14
+            help
+                GPIO number connected to TMC2209 DIAG pin.
+                Open-drain with pull-up: LOW during normal operation
+                (chip sinks), goes HIGH (rising edge) when StallGuard
+                detects a stall.
+
+    endmenu
+
+    menu "UART Configuration"
+
+        config LOCKBEE_TMC_UART_PORT
+            int "UART port number for TMC2209"
+            range 0 1
+            default 1
+            help
+                UART peripheral number (0 or 1). UART0 is used for console.
+
+        config LOCKBEE_TMC_UART_BAUD
+            int "TMC2209 UART baud rate"
+            default 115200
+
+        config LOCKBEE_TMC_SLAVE_ADDR
+            int "TMC2209 slave address (0-3)"
+            range 0 3
+            default 0
+            help
+                Set by MS1/MS2 pin state at power-on:
+                00->0, 10->1, 01->2, 11->3
+
+    endmenu
+
+    menu "Motor Parameters"
+
+        config LOCKBEE_MOTOR_STEPS_PER_REV
+            int "Full steps per revolution"
+            default 200
+            help
+                200 for standard 1.8 deg/step NEMA17.
+
+        config LOCKBEE_MICROSTEPS
+            int "Microstep resolution"
+            default 16
+            help
+                Must be power of 2: 1, 2, 4, 8, 16, 32, 64, 128, 256.
+
+        config LOCKBEE_LOCK_STEPS
+            int "Microstep count for full lock stroke"
+            default 36000
+            help
+                Calibrated microstep count from locked to unlocked position.
+                Experimentally measured value. Overwritten by NVS after each
+                calibration run. Also used as initial estimate before first calibration.
+
+        config LOCKBEE_LOCK_TURNS
+            int "Motor turns to open/close lock (fallback if LOCK_STEPS=0)"
+            default 2
+            help
+                Used only if LOCKBEE_LOCK_STEPS=0. Motor revolutions from locked to unlocked.
+
+        config LOCKBEE_STEP_PERIOD_US
+            int "Step period in microseconds (speed)"
+            default 100
+            help
+                Period between steps in µs. Lower = faster.
+                100 µs = experimentally calibrated value for this lock.
+                Typical range: 2000 µs (~150 RPM), 500 µs (~600 RPM).
+
+        config LOCKBEE_MOTOR_IRUN
+            int "Run current scale IRUN (0-31)"
+            default 16
+            help
+                TMC2209 IRUN register. Controls run current.
+                With Rsense=0.11Ω: IRUN=8~310mA, 16~620mA, 24~930mA (approx).
+
+        config LOCKBEE_MOTOR_IHOLD
+            int "Hold current scale IHOLD (0-31)"
+            default 4
+            help
+                TMC2209 IHOLD register. Current when motor is holding.
+                Lower = less heat when idle.
+
+        config LOCKBEE_MOTOR_IHOLDDELAY
+            int "Hold current delay (0-15)"
+            default 6
+            help
+                Delay in multiples of 2^18 clock cycles before reducing to IHOLD.
+
+    endmenu
+
+    menu "StallGuard Configuration"
+
+        config LOCKBEE_SG_THRESHOLD
+            int "StallGuard threshold SGTHRS (0-255)"
+            default 100
+
+            help
+                Sensitivity of stall detection. Higher = more sensitive (stalls earlier).
+                Tune this value for your specific lock mechanism.
+                Start at 50 and increase until reliable stall detection.
+
+        config LOCKBEE_SG_TCOOLTHRS
+            int "TCOOLTHRS - minimum velocity for StallGuard"
+            default 6000
+            help
+                StallGuard activates only when TSTEP < TCOOLTHRS (TMC2209 12 MHz clock).
+                Formula: TCOOLTHRS > step_period_us * 12 * 5 (5x margin).
+                At speed=100us: TSTEP=1200, TCOOLTHRS=6000 (5x margin).
+                Increase if using a lower speed (higher step_period).
+
+    endmenu
+
+endmenu
