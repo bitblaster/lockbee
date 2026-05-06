@@ -68,14 +68,11 @@ ESP32 RX (G13) ──[1kΩ]──┘
 
 The firmware flushes the 4-byte TX echo before reading the 8-byte reply.
 
-### DIAG pull-up
+### DIAG
 
-The TMC2209 DIAG output is open-drain on many modules (including genuine chips):
-- **Normal operation**: chip pulls DIAG LOW
-- **Stall detected**: chip releases DIAG → internal pull-up drives it HIGH → rising-edge interrupt
-
-The ESP32 internal pull-up (~45 kΩ) is enabled in firmware — no external resistor needed,
-though a 10 kΩ external pull-up to 3.3 V improves noise immunity.
+The TMC2209 DIAG output is **push-pull** (per datasheet): no pull resistor required.
+- **Normal operation**: chip actively drives DIAG LOW
+- **Stall detected**: chip drives DIAG HIGH → rising-edge interrupt on ESP32
 
 ### Power
 
@@ -205,15 +202,12 @@ diameter constraint of the lock housing. Printed in PETG.
 After connecting the DIAG pin and configuring a rising-edge interrupt, the DIAG signal
 stayed at 0 V regardless of `SGTHRS` and `TCOOLTHRS` values.
 
-**Root cause:** Two compounding issues:
-1. The firmware had `GPIO_PULLDOWN_ENABLE` on the DIAG GPIO — fighting any HIGH signal.
-   Since DIAG is open-drain, without a pull-up the pin cannot rise even when the chip
-   releases it. Fixed by switching to `GPIO_PULLUP_ENABLE`.
-2. **SpreadCycle was enabled** (`GCONF.en_SpreadCycle = 1`). The TMC2209 datasheet
-   (§5.2) states: *"DIAG is pulsed by StallGuard... It is only enabled in StealthChop
-   mode."* StallGuard on DIAG — and SG_RESULT register updates — are completely
-   disabled in SpreadCycle mode. Fixed by removing `tmc2209_set_spreadcycle(true)`
-   from the initialization sequence and setting `TPWMTHRS = 0`.
+**Root cause:** **SpreadCycle was enabled** (`GCONF.en_SpreadCycle = 1`).
+The TMC2209 datasheet (§5.2) states: *"DIAG is pulsed by StallGuard... It is only
+enabled in StealthChop mode."* StallGuard on DIAG — and SG_RESULT register updates —
+are completely disabled in SpreadCycle mode. Fixed by removing
+`tmc2209_set_spreadcycle(true)` from the initialization sequence and setting
+`TPWMTHRS = 0`. DIAG is a push-pull output per datasheet — no pull resistor needed.
 
 **Diagnostic tool added:** `sg_monitor` command starts a move asynchronously and
 polls `SG_RESULT` via UART every 100 ms, printing CSV output — allowing real-time

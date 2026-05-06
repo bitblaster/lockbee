@@ -44,9 +44,9 @@ menu "LockBee Configuration"
             default 14
             help
                 GPIO number connected to TMC2209 DIAG pin.
-                Open-drain with pull-up: LOW during normal operation
-                (chip sinks), goes HIGH (rising edge) when StallGuard
-                detects a stall.
+                Push-pull output: LOW during normal operation,
+                goes HIGH (rising edge) when StallGuard detects a stall.
+                No external pull resistor required.
 
     endmenu
 

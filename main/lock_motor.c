@@ -160,13 +160,12 @@ esp_err_t lock_motor_init(lock_motor_t *motor, const lock_motor_config_t *cfg)
     gpio_set_level(cfg->dir_gpio,  0);
 
     // --- GPIO: DIAG (StallGuard output, rising edge interrupt) ---
-    // TMC2209 (and many clones) have DIAG as open-drain:
-    // - normal operation: chip pulls to GND
-    // - stall detected: chip releases → pull-up drives to 3.3V → rising edge
+    // DIAG is a push-pull output (TMC2209 datasheet): no pull required.
+    // LOW during normal operation, HIGH on stall → rising-edge interrupt.
     gpio_config_t diag_io = {
         .pin_bit_mask = (1ULL << cfg->diag_gpio),
         .mode         = GPIO_MODE_INPUT,
-        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type    = GPIO_INTR_POSEDGE,
     };
