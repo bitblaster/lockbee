@@ -1,8 +1,9 @@
 # LockBee
 
 ESP32-H2 based smart lock actuator using a NEMA17 stepper motor and TMC2209 driver.
-The motor is mounted in-axis with the lock cylinder via a 3D-printed gear reduction,
-replacing the internal thumb-turn knob while leaving the external key operation intact.
+The crown gear is mounted in-axis with the lock cylinder thumb-turn; the motor sits
+offset below, connected via a 3D-printed gear reduction. External key operation is
+left intact.
 
 ---
 
@@ -12,25 +13,26 @@ replacing the internal thumb-turn knob while leaving the external key operation 
 |---|---|---|
 | MCU | ESP32-H2 SuperMini | Zigbee + BLE, USB CDC console |
 | Stepper motor | 42BYGH34 dual-shaft | NEMA17, 1.8°/step, 200 steps/rev |
-| Motor driver | TMC2209 module | UART single-wire, StallGuard2 |
+| Motor driver | TMC2209 module | UART single-wire, StallGuard4 |
 | Power supply | 14V DC | Powers motor directly |
-| Buck converter | Mini 560 | 14V → 3.3V for ESP32 |
+| Buck converter | Mini 560 | 14V → 5V; ESP32 onboard LDO regulates to 3.3V |
 
 ### Gear reduction
 
 The lock required more torque than the motor could deliver at IRUN=31.
-A 3D-printed gear pair (PETG) was designed to multiply torque by ~2.54×:
+A 3D-printed gear pair (PETG) was designed to multiply torque by ~3.85×.
+The crown gear is coaxial with the lock thumb-turn; the motor sits offset below.
 
 | Parameter | Motor pinion | Lock crown |
 |---|:---:|:---:|
 | Module | 1 | 1 |
-| Teeth | 13 | 33 |
-| Pitch Ø | 13 mm | 33 mm |
-| Tip Ø | 15 mm | 35 mm |
+| Teeth | 13 | 50 |
+| Pitch Ø | 13 mm | 50 mm |
+| Tip Ø | 15 mm | 52 mm |
 | Face width | 10 mm | 10 mm |
 | Hub | Ø14 × 15 mm, bore 5 mm, M3 grub screw | bore = lock shaft |
 
-Center distance: **23 mm** — Ratio: **2.54:1**
+Center distance: **32 mm** (theoretical 31.5 mm) — Ratio: **3.85:1**
 
 The pinion mounts on the NEMA17 5 mm shaft (D-flat side for the M3 grub screw).
 The crown gear mounts on the lock thumb-turn shaft.
@@ -77,11 +79,14 @@ The TMC2209 DIAG output is **push-pull** (per datasheet): no pull resistor requi
 ### Power
 
 ```
-14V DC ──┬──────────────────── TMC2209 VM (motor power)
+14V DC ──┬──────────────────────────── TMC2209 VM (motor power)
          │
-         └── Mini 560 buck ─── 3.3V ── ESP32-H2 3V3 pin
-                                    └── TMC2209 VIO
+         └── Mini 560 buck ── 5V ──── ESP32-H2 5V pin
+                                  └── TMC2209 VIO
+                                        (ESP32 onboard LDO → 3.3V internally)
 ```
+The buck converter outputs 5V rather than 3.3V to reduce output ripple through
+the ESP32's onboard LDO before reaching sensitive logic circuits.
 
 ---
 
@@ -102,10 +107,10 @@ Each callback fires at `step_period_us` intervals, toggles the STEP GPIO,
 and decrements the step counter. The ISR checks the `stall_detected` flag
 set by the DIAG interrupt and stops the motor immediately on stall.
 
-### StallGuard2 end-stop detection
+### StallGuard4 end-stop detection
 
 The lock has no physical limit switches — end-stops are detected via TMC2209
-StallGuard2: when motor load exceeds the threshold, SG_RESULT drops and DIAG
+StallGuard4: when motor load exceeds the threshold, SG_RESULT drops and DIAG
 is asserted, triggering a GPIO rising-edge interrupt that stops the motor.
 
 **Critical requirement (from datasheet §5.2):**
@@ -195,8 +200,8 @@ python3 $IDF_PATH/tools/idf.py -p /dev/ttyACM0 flash monitor
 
 ### 1. Insufficient torque
 The NEMA17 alone could not turn the lock cylinder even at maximum current (IRUN=31).
-**Solution:** 3D-printed gear reduction (2.54:1) designed to fit within the 35 mm
-diameter constraint of the lock housing. Printed in PETG.
+**Solution:** 3D-printed gear reduction (3.85:1, z13/z50, module 1) with the crown
+coaxial to the lock thumb-turn and the motor offset below. Printed in PETG.
 
 ### 2. StallGuard not triggering — DIAG always LOW
 After connecting the DIAG pin and configuring a rising-edge interrupt, the DIAG signal
