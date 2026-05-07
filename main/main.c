@@ -13,6 +13,7 @@
 #include "lock_motor.h"
 #include "tmc2209.h"
 #include "zigbee.h"
+#include "touch.h"
 
 static const char *TAG = "main";
 
@@ -696,6 +697,12 @@ void app_main(void)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Zigbee init failed: %s", esp_err_to_name(ret));
         // Continue anyway — console still usable for diagnostics
+    }
+
+    // Initialize TTP223 touch buttons (open=GPIO5, close=GPIO6)
+    ret = touch_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Touch init failed: %s", esp_err_to_name(ret));
     }
 
     ESP_LOGI(TAG, "Console ready. Type 'help' for commands.");

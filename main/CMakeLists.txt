@@ -4,6 +4,7 @@ idf_component_register(
         "tmc2209.c"
         "lock_motor.c"
         "zigbee.c"
+        "touch.c"
     INCLUDE_DIRS
         "."
     REQUIRES

@@ -24,6 +24,15 @@ esp_err_t zigbee_init(lock_motor_t *motor);
 void zigbee_schedule_lock_state_update(lock_state_t state);
 
 /**
+ * @brief Send a lock/unlock command to the motor task queue.
+ *        Thread-safe: may be called from any task or ISR context.
+ *        The motor task executes the move and updates the ZCL attribute.
+ *
+ * @param open  true = open (unlock), false = close (lock).
+ */
+void zigbee_motor_cmd_send(bool open);
+
+/**
  * @brief Schedule a Zigbee factory reset (clears network credentials, triggers re-pairing).
  *        Thread-safe: the reset is executed inside the Zigbee task context.
  */

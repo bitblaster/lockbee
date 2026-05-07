@@ -133,6 +133,14 @@ void zigbee_factory_reset(void)
     esp_zb_scheduler_user_alarm(factory_reset_cb, NULL, 0);
 }
 
+/* ─── Motor command send (thread/ISR-safe) ──────────────────────────────── */
+
+void zigbee_motor_cmd_send(bool open)
+{
+    motor_cmd_t cmd = { .type = open ? MOTOR_CMD_UNLOCK : MOTOR_CMD_LOCK };
+    xQueueSend(s_motor_cmd_queue, &cmd, 0);
+}
+
 /* ─── Relock timer callback (runs in Zigbee task context) ───────────────── */
 
 static void relock_cb(void *param)
