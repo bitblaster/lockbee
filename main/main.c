@@ -12,6 +12,7 @@
 
 #include "lock_motor.h"
 #include "tmc2209.h"
+#include "zigbee.h"
 
 static const char *TAG = "main";
 
@@ -138,6 +139,7 @@ static int cmd_open(int argc, char **argv)
         printf("ERROR: open failed (%s)\n", esp_err_to_name(ret));
         return 1;
     }
+    zigbee_schedule_lock_state_update(lock_motor_get_state(&g_motor));
     printf("OK: state=%s pos=%"PRId32"\n",
            lock_motor_state_str(lock_motor_get_state(&g_motor)),
            lock_motor_get_position(&g_motor));
@@ -155,6 +157,7 @@ static int cmd_close(int argc, char **argv)
         printf("ERROR: close failed (%s)\n", esp_err_to_name(ret));
         return 1;
     }
+    zigbee_schedule_lock_state_update(lock_motor_get_state(&g_motor));
     printf("OK: state=%s pos=%"PRId32"\n",
            lock_motor_state_str(lock_motor_get_state(&g_motor)),
            lock_motor_get_position(&g_motor));
@@ -463,6 +466,17 @@ static int cmd_sg_config(int argc, char **argv)
 }
 
 // ---------------------------------------------------------------------------
+// zb_reset  — factory-reset Zigbee network credentials and re-pair
+// ---------------------------------------------------------------------------
+static int cmd_zb_reset(int argc, char **argv)
+{
+    printf("Scheduling Zigbee factory reset...\n");
+    zigbee_factory_reset();
+    printf("OK: device will leave network and restart pairing\n");
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // Register all commands
 // ---------------------------------------------------------------------------
 static void register_commands(void)
@@ -595,6 +609,14 @@ static void register_commands(void)
         .func     = cmd_sg_config,
     };
     esp_console_cmd_register(&sg_cmd);
+
+    // zb_reset
+    esp_console_cmd_t zb_reset_cmd = {
+        .command = "zb_reset",
+        .help    = "Factory-reset Zigbee credentials and restart pairing",
+        .func    = cmd_zb_reset,
+    };
+    esp_console_cmd_register(&zb_reset_cmd);
 }
 
 // ============================================================================
@@ -667,6 +689,13 @@ void app_main(void)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Console init failed: %s", esp_err_to_name(ret));
         return;
+    }
+
+    // Initialize Zigbee (starts Zigbee + motor-command tasks)
+    ret = zigbee_init(&g_motor);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Zigbee init failed: %s", esp_err_to_name(ret));
+        // Continue anyway — console still usable for diagnostics
     }
 
     ESP_LOGI(TAG, "Console ready. Type 'help' for commands.");

@@ -154,3 +154,21 @@ menu "LockBee Configuration"
     endmenu
 
 endmenu
+
+menu "Zigbee Configuration"
+
+    config LOCKBEE_ZB_MANUFACTURER_NAME
+        string "Manufacturer Name"
+        default "LockBee"
+        help
+            Manufacturer name reported in the ZCL Basic cluster.
+            Visible in Zigbee2MQTT and Home Assistant device info.
+
+    config LOCKBEE_ZB_MODEL_IDENTIFIER
+        string "Model Identifier"
+        default "LockBee-v1"
+        help
+            Model identifier reported in the ZCL Basic cluster.
+            Visible in Zigbee2MQTT and Home Assistant device info.
+
+endmenu

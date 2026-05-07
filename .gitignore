@@ -11,3 +11,6 @@ __pycache__/
 .vscode/
 .idea/
 *.swp
+
+# IDF component manager (auto-downloaded, not to be committed)
+managed_components/

@@ -1,0 +1,28 @@
+dependencies:
+  espressif/esp-zboss-lib:
+    dependencies:
+    - name: idf
+      version: '>=5.0'
+    source:
+      path: /opt/esp32/esp-idf-v5.4.2/examples/zigbee/light_sample/HA_on_off_light/managed_components/espressif__esp-zboss-lib
+      type: local
+    version: 1.6.4
+  espressif/esp-zigbee-lib:
+    dependencies:
+    - name: idf
+      version: '>=5.0'
+    source:
+      path: /opt/esp32/esp-zigbee-sdk/components/esp-zigbee-lib
+      type: local
+    version: 1.6.6
+  idf:
+    source:
+      type: idf
+    version: 5.4.2
+direct_dependencies:
+- espressif/esp-zboss-lib
+- espressif/esp-zigbee-lib
+- idf
+manifest_hash: e3798a8b0aa03e2a4cbdd9c3cd9efbac83bd2b1058cd2ac8c56fe33ac4155baf
+target: esp32h2
+version: 2.0.0

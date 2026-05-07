@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "tmc2209.c"
         "lock_motor.c"
+        "zigbee.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -11,4 +12,5 @@ idf_component_register(
         console
         log
         nvs_flash
+        espressif__esp-zigbee-lib
 )

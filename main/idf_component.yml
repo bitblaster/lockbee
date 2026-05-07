@@ -1,0 +1,16 @@
+## IDF Component Manager manifest for LockBee main component
+## Uses local overrides to avoid network downloads:
+##   - esp-zigbee-lib  → local ESP-Zigbee SDK (includes zboss_port layer)
+##   - esp-zboss-lib   → already-downloaded component from IDF Zigbee example
+
+dependencies:
+  idf:
+    version: ">=5.4.0"
+
+  espressif/esp-zigbee-lib:
+    version: ">=1.6.0"
+    override_path: "/opt/esp32/esp-zigbee-sdk/components/esp-zigbee-lib"
+
+  espressif/esp-zboss-lib:
+    version: ">=1.6.0"
+    override_path: "/opt/esp32/esp-idf-v5.4.2/examples/zigbee/light_sample/HA_on_off_light/managed_components/espressif__esp-zboss-lib"
