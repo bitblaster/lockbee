@@ -44,14 +44,16 @@ The crown gear mounts on the lock thumb-turn shaft.
 All six signals are routed to the right-side pins of the SuperMini (GP9–GP14),
 keeping the left side free for future use or clean PCB routing.
 
-| Signal | ESP32-H2 GPIO | SuperMini pin | TMC2209 pin |
+| Signal | ESP32-H2 GPIO | SuperMini pin | Target |
 |---|:---:|:---:|---|
-| STEP | 9 | G9 | STEP |
-| DIR | 10 | G10 | DIR |
-| EN (active LOW) | 11 | G11 | EN |
-| UART TX | 12 | G12 | PDN_UART |
-| UART RX | 13 | G13 | PDN_UART (via 1 kΩ) |
-| DIAG | 14 | G14 | DIAG |
+| STEP | 9 | G9 | TMC2209 STEP |
+| DIR | 10 | G10 | TMC2209 DIR |
+| EN (active LOW) | 11 | G11 | TMC2209 EN |
+| UART TX | 12 | G12 | TMC2209 PDN_UART |
+| UART RX | 13 | G13 | TMC2209 PDN_UART (via 1 kΩ) |
+| DIAG | 14 | G14 | TMC2209 DIAG |
+| Touch OPEN | 5 | G5 | TTP223 module #1 output |
+| Touch CLOSE | 6 | G6 | TTP223 module #2 output |
 
 > **GPIO 9** doubles as the BOOT strapping pin, but causes no conflict because
 > STEP is driven by the ESP32 (output) into the TMC2209 high-impedance input —
@@ -94,9 +96,11 @@ the ESP32's onboard LDO before reaching sensitive logic circuits.
 
 ```
 main/
-├── main.c           — app_main, console REPL, CLI commands, NVS persistence
-├── tmc2209.h/.c     — TMC2209 UART driver (CRC-8, register R/W, StallGuard)
-├── lock_motor.h/.c  — GPTimer step generation, lock open/close/calibrate
+├── main.c            — app_main, console REPL, CLI commands, NVS persistence
+├── tmc2209.h/.c      — TMC2209 UART driver (CRC-8, register R/W, StallGuard)
+├── lock_motor.h/.c   — GPTimer step generation, lock open/close/calibrate
+├── zigbee.h/.c       — Zigbee stack (Door Lock cluster), ZCL callbacks, motor queue
+├── touch.h/.c        — TTP223 touch button handler (ISR + debounce task)
 └── Kconfig.projbuild — menuconfig options for all GPIOs and motor parameters
 ```
 
@@ -123,6 +127,32 @@ TPWMTHRS is set to 0 (no upper speed limit). TCOOLTHRS must satisfy:
 TCOOLTHRS > step_period_µs × fCLK_MHz × safety_margin
            = 100 × 12 × 5 = 6000   (at default speed)
 ```
+
+### Task architecture
+
+All motor commands — from Zigbee, the console REPL, and touch buttons — are
+serialised through a single FreeRTOS queue consumed by `motor_task`:
+
+```
+zb_task (ZB stack loop, prio 5)
+  └── ZCL callbacks → xQueueSend(motor_cmd_queue)
+
+motor_task (prio 4)
+  └── xQueueReceive → lock_motor_open/close() [blocking]
+        └── esp_zb_scheduler_user_alarm(update_lock_state_cb, 0)
+
+Console REPL task
+  └── cmd_open/cmd_close → lock_motor_open/close() [blocking]
+        └── zigbee_schedule_lock_state_update()
+
+touch_task (prio 3)
+  └── GPIO ISR → queue → debounce → zigbee_motor_cmd_send()
+        └── xQueueSend(motor_cmd_queue)
+```
+
+ZCL attribute updates (`esp_zb_zcl_set_attribute_val`) must run inside the
+Zigbee task context; `motor_task` posts them back via
+`esp_zb_scheduler_user_alarm(cb, NULL, 0)` (delay 0 = next Zigbee stack tick).
 
 ### Calibration
 
@@ -175,6 +205,127 @@ Connect at 115200 baud (or use `idf.py monitor`).
 | `tmc_read <reg>` | Read TMC2209 register (hex, e.g. `0x6F`) |
 | `tmc_write <reg> <val>` | Write TMC2209 register |
 | `tmc_dump` | Dump all key TMC2209 registers |
+| `zb_reset` | Factory-reset Zigbee (clears stored network, triggers re-pairing) |
+
+---
+
+## Zigbee / Home Assistant
+
+The firmware exposes a **Zigbee Door Lock** device (ZCL cluster 0x0101),
+compatible with Zigbee2MQTT and Home Assistant out of the box.
+
+### Commissioning (first pairing)
+
+1. Flash the firmware and power on. The device immediately starts scanning for
+   a Zigbee coordinator (network steering). If no coordinator is found it
+   retries every second — no manual action needed.
+2. In Zigbee2MQTT: open **Permit join** (global or for a specific router).
+3. The device joins the network and appears as a `lock` entity in Home
+   Assistant. No YAML configuration is required — the Door Lock cluster is
+   auto-discovered.
+
+To re-pair (e.g. after replacing the coordinator): run `zb_reset` from the
+USB console. The device clears its stored network credentials and restarts
+the pairing scan.
+
+### Supported ZCL commands
+
+| ZCL command | ZCL code | Firmware action |
+|---|:---:|---|
+| Lock Door | 0x00 | Motor moves to locked position |
+| Unlock Door | 0x01 | Motor moves to unlocked position |
+| Unlock with Timeout | 0x03 | Motor unlocks, then re-locks after N seconds |
+
+**UnlockWithTimeout** is handled entirely in firmware — no automation on the
+HA side is required. The timeout (uint16, seconds) is encoded in the ZCL
+payload. If a new command arrives before the timer expires, the pending
+re-lock is cancelled.
+
+### LockState attribute reporting
+
+After every motor move the firmware updates the ZCL `LockState` attribute
+(cluster 0x0101, attribute 0x0000) and pushes an unsolicited report to the
+coordinator:
+
+| `LockState` value | Meaning |
+|:---:|---|
+| 0 | Not fully locked (transitioning or unknown) |
+| 1 | Locked |
+| 2 | Unlocked |
+
+Home Assistant reflects the new state in real-time without polling.
+
+### Home Assistant automation examples
+
+**Auto-lock after the door closes (reed switch on a separate sensor):**
+```yaml
+automation:
+  - alias: "Auto-lock after door closes"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.door_reed
+        to: "off"          # reed closed = door shut
+    condition:
+      - condition: state
+        entity_id: lock.lockbee
+        state: "unlocked"
+    action:
+      - delay: "00:00:30"
+      - service: lock.lock
+        target: {entity_id: lock.lockbee}
+```
+
+**Push notification on every lock state change:**
+```yaml
+automation:
+  - alias: "LockBee state notification"
+    trigger:
+      - platform: state
+        entity_id: lock.lockbee
+    action:
+      - service: notify.mobile_app_YOURPHONE
+        data:
+          title: "LockBee"
+          message: "Serratura: {{ states('lock.lockbee') | upper }}"
+```
+
+---
+
+## Touch Buttons
+
+Two **TTP223** capacitive touch modules allow direct local control without
+any network dependency:
+
+| Module | GPIO | Action |
+|---|:---:|---|
+| Touch OPEN | G5 | Unlocks the door (same as `open` console command) |
+| Touch CLOSE | G6 | Locks the door (same as `close` console command) |
+
+### Wiring
+
+Power the TTP223 modules from the ESP32 **3.3 V** rail (not 5 V). The module
+output is **push-pull active HIGH** — connect directly to the GPIO, no pull
+resistor needed:
+
+```
+ESP32 3V3 ──── TTP223 VCC
+ESP32 GND ──── TTP223 GND
+ESP32 G5  ──── TTP223 #1 OUT  (OPEN)
+ESP32 G6  ──── TTP223 #2 OUT  (CLOSE)
+```
+
+### Firmware behaviour
+
+- A **rising-edge GPIO ISR** fires on each touch and posts the button index
+  to a FreeRTOS queue.
+- `touch_task` reads the queue and applies a **500 ms per-button debounce**:
+  a second press within 500 ms of the first is silently discarded.
+- Accepted presses call `zigbee_motor_cmd_send()`, which posts to the shared
+  motor command queue — the same queue used by Zigbee and console commands.
+  All three sources are fully serialised; concurrent presses never cause a
+  race condition.
+- After the motor move completes, the `LockState` ZCL attribute is updated
+  just as it would be for any other command source.
 
 ---
 
@@ -233,5 +384,5 @@ The ESP-IDF `build/` directory contains hundreds of compiled objects and binarie
 ## Next Steps
 
 - Acceleration ramp in `lock_motor.c` for smoother start/stop
-- Zigbee integration for Home Assistant
 - 3D-printed enclosure with dedicated slots for ESP32, TMC2209 module, and buck converter
+- ZCL PIN code management (SetPINCode cluster commands) for keypad integration
