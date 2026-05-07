@@ -18,7 +18,6 @@
 #include "driver/gpio.h"
 #include "esp_check.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -28,9 +27,6 @@ static const char *TAG = "touch";
 
 #define TOUCH_OPEN_GPIO    CONFIG_LOCKBEE_TOUCH_OPEN_GPIO
 #define TOUCH_CLOSE_GPIO   CONFIG_LOCKBEE_TOUCH_CLOSE_GPIO
-
-/* Minimum time between two accepted presses of the same button (µs) */
-#define DEBOUNCE_US        (500 * 1000ULL)  /* 500 ms */
 
 #define TOUCH_QUEUE_LEN    4
 #define TOUCH_TASK_STACK   2048
@@ -54,7 +50,6 @@ static void IRAM_ATTR touch_isr(void *arg)
 
 static void touch_task(void *pvParameters)
 {
-    int64_t last_press[2] = { 0, 0 };
     uint8_t btn;
 
     while (1) {
@@ -62,12 +57,6 @@ static void touch_task(void *pvParameters)
             continue;
         }
         if (btn > 1) continue;
-
-        int64_t now = esp_timer_get_time();
-        if (now - last_press[btn] < DEBOUNCE_US) {
-            continue;  /* debounce: ignore rapid re-trigger */
-        }
-        last_press[btn] = now;
 
         bool open = (btn == BTN_OPEN);
         ESP_LOGI(TAG, "Touch: %s", open ? "OPEN" : "CLOSE");

@@ -318,12 +318,12 @@ ESP32 G6  ──── TTP223 #2 OUT  (CLOSE)
 
 - A **rising-edge GPIO ISR** fires on each touch and posts the button index
   to a FreeRTOS queue.
-- `touch_task` reads the queue and applies a **500 ms per-button debounce**:
-  a second press within 500 ms of the first is silently discarded.
-- Accepted presses call `zigbee_motor_cmd_send()`, which posts to the shared
-  motor command queue — the same queue used by Zigbee and console commands.
-  All three sources are fully serialised; concurrent presses never cause a
-  race condition.
+- `touch_task` reads the queue and calls `zigbee_motor_cmd_send()`, posting
+  to the shared motor command queue — the same queue used by Zigbee and
+  console commands. All three sources are fully serialised; concurrent
+  presses never cause a race condition.
+- No software debounce is needed: the TTP223 chip integrates hardware
+  debounce and outputs a clean digital signal.
 - After the motor move completes, the `LockState` ZCL attribute is updated
   just as it would be for any other command source.
 
