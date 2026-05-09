@@ -24,3 +24,7 @@ CONFIG_IEEE802154_RX_BUFFER_SIZE=20
 # Increase main task stack for Zigbee + console coexistence
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
+# Custom partition table (includes zb_storage and zb_fct for Zigbee stack)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
