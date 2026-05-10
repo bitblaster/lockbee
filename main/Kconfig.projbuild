@@ -5,28 +5,28 @@ menu "LockBee Configuration"
         config LOCKBEE_STEP_GPIO
             int "TMC2209 STEP GPIO"
             range 0 30
-            default 9
+            default 13
             help
                 GPIO number connected to TMC2209 STEP pin.
 
         config LOCKBEE_DIR_GPIO
             int "TMC2209 DIR GPIO"
             range 0 30
-            default 10
+            default 14
             help
                 GPIO number connected to TMC2209 DIR pin.
 
         config LOCKBEE_EN_GPIO
             int "TMC2209 EN GPIO (active LOW)"
             range 0 30
-            default 11
+            default 9
             help
                 GPIO number connected to TMC2209 EN pin (active LOW to enable).
 
         config LOCKBEE_UART_TX_GPIO
             int "TMC2209 PDN_UART TX GPIO"
             range 0 30
-            default 12
+            default 11
             help
                 GPIO number connected to TMC2209 PDN_UART pin (TX side).
                 Connect TX->RX via 1kΩ resistor for single-wire UART.
@@ -34,14 +34,14 @@ menu "LockBee Configuration"
         config LOCKBEE_UART_RX_GPIO
             int "TMC2209 PDN_UART RX GPIO"
             range 0 30
-            default 13
+            default 12
             help
                 GPIO number connected to TMC2209 PDN_UART pin (RX side, looped from TX).
 
         config LOCKBEE_DIAG_GPIO
             int "TMC2209 DIAG GPIO (StallGuard output)"
             range 0 30
-            default 14
+            default 10
             help
                 GPIO number connected to TMC2209 DIAG pin.
                 Push-pull output: LOW during normal operation,
