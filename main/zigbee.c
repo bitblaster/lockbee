@@ -363,6 +363,11 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         }
         break;
 
+    case ESP_ZB_ZDO_SIGNAL_LEAVE:
+        ESP_LOGW(TAG, "Leave request received — clearing credentials and restarting pairing");
+        esp_zb_factory_reset();
+        break;
+
     default:
         ESP_LOGI(TAG, "ZDO signal: %s (0x%x) status %s",
                  esp_zb_zdo_signal_to_string(sig), sig, esp_err_to_name(err));
