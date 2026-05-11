@@ -13,5 +13,6 @@ idf_component_register(
         console
         log
         nvs_flash
+        app_update
         espressif__esp-zigbee-lib
 )

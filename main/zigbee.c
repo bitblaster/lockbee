@@ -19,6 +19,7 @@
 
 #include <string.h>
 #include <stdint.h>
+#include "esp_ota_ops.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -43,6 +44,12 @@ static const char *TAG = "zigbee";
 #define ZB_TASK_PRIO            5
 #define MOTOR_TASK_PRIO         4
 
+/* OTA Upgrade client */
+#define OTA_MANUFACTURER_CODE   0x1234   /* arbitrary; must match .ota file header */
+#define OTA_IMAGE_TYPE          0x0000
+#define OTA_FILE_VERSION        0x00000001
+#define OTA_MAX_DATA_SIZE       64
+
 /* ZCL Door Lock — LockState attribute values (Table 7-4 ZCL spec) */
 #define ZCL_LOCK_STATE_NOT_FULLY_LOCKED  0x00
 #define ZCL_LOCK_STATE_LOCKED            0x01
@@ -63,8 +70,12 @@ typedef struct {
 
 /* ─── Module state ──────────────────────────────────────────────────────── */
 
-static QueueHandle_t   s_motor_cmd_queue;
-static lock_motor_t   *s_motor;
+static QueueHandle_t         s_motor_cmd_queue;
+static lock_motor_t         *s_motor;
+
+/* OTA state (used only during an active upgrade) */
+static esp_ota_handle_t      s_ota_handle;
+static const esp_partition_t *s_ota_partition;
 
 /*
  * Relock generation counter.
@@ -75,6 +86,54 @@ static lock_motor_t   *s_motor;
  */
 static volatile uint32_t  s_relock_gen;
 static uint8_t             s_relock_alarm_handle;  /* esp_zb_user_cb_handle_t = uint8 */
+
+/* ─── OTA Upgrade callback ──────────────────────────────────────────────── */
+
+static esp_err_t zb_ota_cb(esp_zb_zcl_ota_upgrade_value_message_t *msg)
+{
+    if (msg->info.status != ESP_ZB_ZCL_STATUS_SUCCESS) {
+        ESP_LOGW(TAG, "OTA: bad status 0x%x", msg->info.status);
+        return ESP_FAIL;
+    }
+
+    esp_err_t ret = ESP_OK;
+    switch (msg->upgrade_status) {
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_START:
+        ESP_LOGI(TAG, "OTA upgrade started (file ver 0x%08"PRIx32")",
+                 msg->ota_header.file_version);
+        s_ota_partition = esp_ota_get_next_update_partition(NULL);
+        if (!s_ota_partition) {
+            ESP_LOGE(TAG, "OTA: no update partition available");
+            return ESP_FAIL;
+        }
+        ret = esp_ota_begin(s_ota_partition, OTA_WITH_SEQUENTIAL_WRITES, &s_ota_handle);
+        ESP_RETURN_ON_ERROR(ret, TAG, "esp_ota_begin failed");
+        break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_RECEIVE:
+        ret = esp_ota_write(s_ota_handle, msg->payload, msg->payload_size);
+        ESP_RETURN_ON_ERROR(ret, TAG, "esp_ota_write failed");
+        break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_FINISH:
+        ESP_LOGI(TAG, "OTA upgrade complete — validating and rebooting");
+        ret = esp_ota_end(s_ota_handle);
+        ESP_RETURN_ON_ERROR(ret, TAG, "esp_ota_end failed");
+        ret = esp_ota_set_boot_partition(s_ota_partition);
+        ESP_RETURN_ON_ERROR(ret, TAG, "esp_ota_set_boot_partition failed");
+        esp_restart();
+        break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_ABORT:
+        ESP_LOGW(TAG, "OTA upgrade aborted");
+        esp_ota_abort(s_ota_handle);
+        s_ota_handle    = 0;
+        s_ota_partition = NULL;
+        break;
+    }
+    return ret;
+}
 
 /* ─── ZCL attribute update (must run in Zigbee task context) ────────────── */
 
@@ -192,6 +251,9 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
         }
         break;
     }
+    case ESP_ZB_CORE_OTA_UPGRADE_VALUE_CB_ID:
+        return zb_ota_cb((esp_zb_zcl_ota_upgrade_value_message_t *)message);
+
     default:
         break;
     }
@@ -283,6 +345,27 @@ static void zb_task(void *pvParameters)
             esp_zb_basic_cluster_add_attr(basic_cluster,
                 ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, model_id);
         }
+    }
+
+    /* Add OTA Upgrade client cluster */
+    if (cluster_list) {
+        esp_zb_ota_cluster_cfg_t ota_cfg = {
+            .ota_upgrade_file_version        = OTA_FILE_VERSION,
+            .ota_upgrade_downloaded_file_ver = OTA_FILE_VERSION,
+            .ota_upgrade_manufacturer        = OTA_MANUFACTURER_CODE,
+            .ota_upgrade_image_type          = OTA_IMAGE_TYPE,
+        };
+        esp_zb_attribute_list_t *ota_attr = esp_zb_ota_upgrade_client_clusters_create(&ota_cfg);
+        esp_zb_ota_upgrade_client_parameter_t ota_param = {
+            .query_timer      = ESP_ZB_ZCL_OTA_UPGRADE_QUERY_TIMER_COUNT_DEF,
+            .hardware_version = 0x0001,
+            .max_data_size    = OTA_MAX_DATA_SIZE,
+        };
+        esp_zb_ota_upgrade_client_parameter_add(ota_attr, &ota_param);
+        esp_zb_cluster_list_add_ota_upgrade_client_cluster(
+            cluster_list, ota_attr, ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
+        ESP_LOGI(TAG, "OTA cluster added (manufacturer=0x%04x image=0x%04x ver=0x%08"PRIx32")",
+                 OTA_MANUFACTURER_CODE, OTA_IMAGE_TYPE, (uint32_t)OTA_FILE_VERSION);
     }
 
     esp_zb_device_register(ep_list);
