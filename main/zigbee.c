@@ -11,8 +11,9 @@
  *  - esp_zb_zcl_set_attribute_val() and esp_zb_zcl_report_attr_cmd_req()
  *    must be called only from the Zigbee task context — always via
  *    esp_zb_scheduler_user_alarm(…, delay=0).
- *  - esp_zb_scheduler_user_alarm() itself is called from motor_task and the
- *    console REPL task; this is intentional and supported by the SDK.
+ *  - Any esp_zb_scheduler_user_alarm() call from a non-ZB task must be
+ *    wrapped with esp_zb_lock_acquire()/esp_zb_lock_release() to serialise
+ *    with the ZBOSS kernel and prevent critical-section imbalance crashes.
  */
 
 #include "zigbee.h"
@@ -20,6 +21,9 @@
 #include <string.h>
 #include <stdint.h>
 #include "esp_ota_ops.h"
+#include "esp_zigbee_ota.h"
+
+#define OTA_ELEMENT_HEADER_LEN  6   /* uint16_t tag + uint32_t length */
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -89,35 +93,72 @@ static uint8_t             s_relock_alarm_handle;  /* esp_zb_user_cb_handle_t = 
 
 /* ─── OTA Upgrade callback ──────────────────────────────────────────────── */
 
-static esp_err_t zb_ota_cb(esp_zb_zcl_ota_upgrade_value_message_t *msg)
+static esp_err_t zb_ota_cb(esp_zb_zcl_ota_upgrade_value_message_t msg)
 {
-    if (msg->info.status != ESP_ZB_ZCL_STATUS_SUCCESS) {
-        ESP_LOGW(TAG, "OTA: bad status 0x%x", msg->info.status);
+    static uint32_t s_total_size = 0;
+    static uint32_t s_offset     = 0;
+    static bool     s_hdr_done   = false;
+    esp_err_t ret = ESP_OK;
+
+    if (msg.info.status != ESP_ZB_ZCL_STATUS_SUCCESS) {
         return ESP_FAIL;
     }
 
-    esp_err_t ret = ESP_OK;
-    switch (msg->upgrade_status) {
+    switch (msg.upgrade_status) {
 
     case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_START:
         ESP_LOGI(TAG, "OTA upgrade started (file ver 0x%08"PRIx32")",
-                 msg->ota_header.file_version);
+                 msg.ota_header.file_version);
         s_ota_partition = esp_ota_get_next_update_partition(NULL);
         if (!s_ota_partition) {
             ESP_LOGE(TAG, "OTA: no update partition available");
             return ESP_FAIL;
         }
-        ret = esp_ota_begin(s_ota_partition, OTA_WITH_SEQUENTIAL_WRITES, &s_ota_handle);
+        ret = esp_ota_begin(s_ota_partition, 0, &s_ota_handle);
         ESP_RETURN_ON_ERROR(ret, TAG, "esp_ota_begin failed");
+        s_total_size = 0;
+        s_offset     = 0;
+        s_hdr_done   = false;
         break;
 
     case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_RECEIVE:
-        ret = esp_ota_write(s_ota_handle, msg->payload, msg->payload_size);
-        ESP_RETURN_ON_ERROR(ret, TAG, "esp_ota_write failed");
+        s_total_size = msg.ota_header.image_size;
+        if (msg.payload && msg.payload_size) {
+            const uint8_t *data = (const uint8_t *)msg.payload;
+            uint16_t       dlen = msg.payload_size;
+            /* Strip 6-byte OTA element header (uint16_t tag + uint32_t length)
+             * that Zigbee2MQTT prepends to the first block. */
+            if (!s_hdr_done) {
+                s_hdr_done = true;
+                if (dlen > OTA_ELEMENT_HEADER_LEN) {
+                    data += OTA_ELEMENT_HEADER_LEN;
+                    dlen -= OTA_ELEMENT_HEADER_LEN;
+                } else {
+                    /* Header-only block — nothing to write */
+                    s_offset += dlen;
+                    break;
+                }
+            }
+            s_offset += msg.payload_size;
+            ESP_LOGI(TAG, "OTA receive: %"PRIu32"/%"PRIu32" bytes", s_offset, s_total_size);
+            ret = esp_ota_write(s_ota_handle, data, dlen);
+            ESP_RETURN_ON_ERROR(ret, TAG, "esp_ota_write failed");
+        }
+        break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_APPLY:
+        ESP_LOGI(TAG, "OTA upgrade apply");
+        break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_CHECK:
+        ret = (s_offset == s_total_size) ? ESP_OK : ESP_FAIL;
+        ESP_LOGI(TAG, "OTA check: offset=%"PRIu32" total=%"PRIu32" → %s",
+                 s_offset, s_total_size, esp_err_to_name(ret));
+        s_offset = 0; s_total_size = 0; s_hdr_done = false;
         break;
 
     case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_FINISH:
-        ESP_LOGI(TAG, "OTA upgrade complete — validating and rebooting");
+        ESP_LOGI(TAG, "OTA complete — setting boot partition and rebooting");
         ret = esp_ota_end(s_ota_handle);
         ESP_RETURN_ON_ERROR(ret, TAG, "esp_ota_end failed");
         ret = esp_ota_set_boot_partition(s_ota_partition);
@@ -130,6 +171,11 @@ static esp_err_t zb_ota_cb(esp_zb_zcl_ota_upgrade_value_message_t *msg)
         esp_ota_abort(s_ota_handle);
         s_ota_handle    = 0;
         s_ota_partition = NULL;
+        s_offset = 0; s_total_size = 0; s_hdr_done = false;
+        break;
+
+    default:
+        ESP_LOGI(TAG, "OTA status: %d", msg.upgrade_status);
         break;
     }
     return ret;
@@ -176,7 +222,13 @@ static void update_lock_state_cb(void *param)
 
 void zigbee_schedule_lock_state_update(lock_state_t state)
 {
-    esp_zb_scheduler_user_alarm(update_lock_state_cb, (void *)(uintptr_t)state, 0);
+    /* Must NOT be called from within the ZB task (would deadlock on lock).
+     * For ZB-task-internal use call update_lock_state_cb() directly. */
+    if (esp_zb_lock_acquire(portMAX_DELAY)) {
+        esp_zb_scheduler_user_alarm(update_lock_state_cb,
+                                    (void *)(uintptr_t)state, 0);
+        esp_zb_lock_release();
+    }
 }
 
 /* ─── Factory reset (must run in Zigbee task context) ───────────────────── */
@@ -189,7 +241,10 @@ static void factory_reset_cb(void *param)
 
 void zigbee_factory_reset(void)
 {
-    esp_zb_scheduler_user_alarm(factory_reset_cb, NULL, 0);
+    if (esp_zb_lock_acquire(portMAX_DELAY)) {
+        esp_zb_scheduler_user_alarm(factory_reset_cb, NULL, 0);
+        esp_zb_lock_release();
+    }
 }
 
 /* ─── Motor command send (thread/ISR-safe) ──────────────────────────────── */
@@ -252,7 +307,7 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
         break;
     }
     case ESP_ZB_CORE_OTA_UPGRADE_VALUE_CB_ID:
-        return zb_ota_cb((esp_zb_zcl_ota_upgrade_value_message_t *)message);
+        return zb_ota_cb(*(esp_zb_zcl_ota_upgrade_value_message_t *)message);
 
     default:
         break;
@@ -290,17 +345,25 @@ static void motor_task(void *pvParameters)
         case MOTOR_CMD_UNLOCK_WITH_TIMEOUT:
             lock_motor_open(s_motor);
             /* Schedule re-lock. Pass generation so stale callbacks no-op. */
-            s_relock_alarm_handle = esp_zb_scheduler_user_alarm(
-                relock_cb, (void *)(uintptr_t)gen,
-                (uint32_t)cmd.timeout_sec * 1000U);
+            if (esp_zb_lock_acquire(portMAX_DELAY)) {
+                s_relock_alarm_handle = esp_zb_scheduler_user_alarm(
+                    relock_cb, (void *)(uintptr_t)gen,
+                    (uint32_t)cmd.timeout_sec * 1000U);
+                esp_zb_lock_release();
+            }
             ESP_LOGI(TAG, "Relock scheduled in %"PRIu32" s", cmd.timeout_sec);
             break;
         }
 
-        /* Schedule ZCL attribute update in Zigbee task context */
+        /* Schedule ZCL attribute update in Zigbee task context.
+         * esp_zb_lock_acquire serialises with the ZBOSS kernel so that
+         * esp_zb_scheduler_user_alarm() is safe to call from this task. */
         lock_state_t new_state = lock_motor_get_state(s_motor);
-        esp_zb_scheduler_user_alarm(update_lock_state_cb,
-                                    (void *)(uintptr_t)new_state, 0);
+        if (esp_zb_lock_acquire(portMAX_DELAY)) {
+            esp_zb_scheduler_user_alarm(update_lock_state_cb,
+                                        (void *)(uintptr_t)new_state, 0);
+            esp_zb_lock_release();
+        }
     }
 }
 
@@ -355,15 +418,18 @@ static void zb_task(void *pvParameters)
             .ota_upgrade_manufacturer        = OTA_MANUFACTURER_CODE,
             .ota_upgrade_image_type          = OTA_IMAGE_TYPE,
         };
-        esp_zb_attribute_list_t *ota_attr = esp_zb_ota_upgrade_client_clusters_create(&ota_cfg);
-        esp_zb_ota_upgrade_client_parameter_t ota_param = {
-            .query_timer      = ESP_ZB_ZCL_OTA_UPGRADE_QUERY_TIMER_COUNT_DEF,
-            .hardware_version = 0x0001,
-            .max_data_size    = OTA_MAX_DATA_SIZE,
+        esp_zb_attribute_list_t *ota_attr = esp_zb_ota_cluster_create(&ota_cfg);
+        esp_zb_zcl_ota_upgrade_client_variable_t variable_cfg = {
+            .timer_query   = ESP_ZB_ZCL_OTA_UPGRADE_QUERY_TIMER_COUNT_DEF,
+            .hw_version    = 0x0001,
+            .max_data_size = OTA_MAX_DATA_SIZE,
         };
-        esp_zb_ota_upgrade_client_parameter_add(ota_attr, &ota_param);
-        esp_zb_cluster_list_add_ota_upgrade_client_cluster(
-            cluster_list, ota_attr, ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
+        uint16_t ota_server_addr = 0xffff;
+        uint8_t  ota_server_ep   = 0xff;
+        esp_zb_ota_cluster_add_attr(ota_attr, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_CLIENT_DATA_ID,      &variable_cfg);
+        esp_zb_ota_cluster_add_attr(ota_attr, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_SERVER_ADDR_ID,      &ota_server_addr);
+        esp_zb_ota_cluster_add_attr(ota_attr, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_SERVER_ENDPOINT_ID,  &ota_server_ep);
+        esp_zb_cluster_list_add_ota_cluster(cluster_list, ota_attr, ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
         ESP_LOGI(TAG, "OTA cluster added (manufacturer=0x%04x image=0x%04x ver=0x%08"PRIx32")",
                  OTA_MANUFACTURER_CODE, OTA_IMAGE_TYPE, (uint32_t)OTA_FILE_VERSION);
     }
@@ -419,7 +485,8 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             } else {
                 ESP_LOGI(TAG, "Device rebooted — syncing lock state to ZCL");
                 if (s_motor) {
-                    zigbee_schedule_lock_state_update(
+                    /* Already in ZB task context — call directly, no lock needed */
+                    update_lock_state_cb((void *)(uintptr_t)
                         lock_motor_get_state(s_motor));
                 }
             }

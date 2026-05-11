@@ -351,6 +351,101 @@ python3 $IDF_PATH/tools/idf.py -p /dev/ttyACM0 flash monitor
 
 ---
 
+## OTA Firmware Update (Zigbee)
+
+LockBee supports over-the-air firmware updates via the ZCL OTA Upgrade cluster (0x0019),
+using Zigbee2MQTT as the OTA server. No USB connection required.
+
+### Prerequisites
+
+- Zigbee2MQTT running with the LockBee converter active
+- ESP-IDF environment activated (for building)
+- `zigbee-ota` Python package:  `pip install zigbee-ota`
+
+### Step 1 — Increment the firmware version
+
+In `main/zigbee.c`, increment `OTA_FILE_VERSION` before building:
+
+```c
+#define OTA_FILE_VERSION  0x00000002   /* bump for each OTA release */
+```
+
+The device only accepts an OTA image whose `file_version` is strictly greater than
+the currently running one.
+
+### Step 2 — Build
+
+```bash
+rm -f sdkconfig
+python3 $IDF_PATH/tools/idf.py build
+```
+
+### Step 3 — Generate the `.ota` file
+
+```bash
+python3 -m zigbee_ota create \
+    --manufacturer-code 0x1234 \
+    --image-type 0x0000 \
+    --file-version <same value as OTA_FILE_VERSION in hex, e.g. 2> \
+    --hardware-version 0x0001 \
+    --stack-version 2 \
+    build/LockBee.bin \
+    LockBee-v<version>.ota
+```
+
+`LockBee.bin` is the merged binary produced by `idf.py build` at
+`build/LockBee.bin`. If it does not exist, generate it manually:
+
+```bash
+python3 $IDF_PATH/components/esptool_py/esptool/esptool.py \
+    --chip esp32h2 merge_bin \
+    -o build/LockBee.bin \
+    @build/flash_args
+```
+
+### Step 4 — Deploy to Zigbee2MQTT
+
+Copy the `.ota` file into the Zigbee2MQTT OTA directory (default: `data/ota/`):
+
+```bash
+cp LockBee-v<version>.ota /path/to/zigbee2mqtt/data/ota/
+```
+
+Then add (or verify) this entry in `configuration.yaml`:
+
+```yaml
+ota:
+  zigbee_ota_override_index_location: data/ota/index.json
+```
+
+Restart Zigbee2MQTT. The device queries the OTA server at boot and periodically
+thereafter. When a newer image is found, the upgrade starts automatically.
+
+### Step 5 — Monitor the update
+
+In Zigbee2MQTT → device page → OTA tab you can see progress (%).
+On the USB console (`idf.py monitor`) you will see:
+
+```
+I (xxx) zigbee: OTA upgrade started (file ver 0x00000002)
+I (xxx) zigbee: OTA upgrade complete — validating and rebooting
+```
+
+The device reboots automatically at the end of the transfer and runs the new firmware.
+
+### Notes
+
+- The partition table has two OTA slots (`ota_0` / `ota_1`, 768 KB each).
+  The bootloader alternates between them so a failed update leaves the previous
+  firmware intact.
+- `OTA_MANUFACTURER_CODE` (0x1234) and `OTA_IMAGE_TYPE` (0x0000) in `zigbee.c`
+  must match the `--manufacturer-code` and `--image-type` arguments used when
+  creating the `.ota` file.
+- After the **first** flash with the OTA partition table, the device must be
+  flashed via USB once (`idf.py flash`) before OTA is available.
+
+---
+
 ## Problems Solved
 
 ### 1. Insufficient torque

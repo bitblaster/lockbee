@@ -6,7 +6,7 @@
  *
  * Architecture:
  *  - GPIO rising-edge ISR → sends button index to a FreeRTOS queue
- *  - touch_task → debounce (500 ms per button) → zigbee_motor_cmd_send()
+ *  - touch_task → hold-confirm (500 ms) → zigbee_motor_cmd_send()
  *
  * The motor command is routed through the Zigbee motor queue so that
  * touch, Zigbee, and console commands are all serialised.
@@ -32,8 +32,8 @@ static const char *TAG = "touch";
 #define TOUCH_TASK_STACK      2048
 #define TOUCH_TASK_PRIO       3
 
-#define DUAL_PRESS_WINDOW_MS  100   /* wait after ISR to detect simultaneous press */
-#define DEBOUNCE_MS           500   /* ignore same button for this long after an action */
+#define DUAL_PRESS_WINDOW_MS  100   /* wait after first ISR to catch simultaneous press */
+#define HOLD_CONFIRM_MS       500   /* button must be held this long to fire the action */
 
 /* Button indices sent through the queue */
 #define BTN_OPEN   0
@@ -52,30 +52,30 @@ static void IRAM_ATTR touch_isr(void *arg)
 
 /* ─── Task ──────────────────────────────────────────────────────────────── */
 
+/* Wait until a GPIO goes LOW (button released), polling every 50 ms. */
+static void wait_for_release(int gpio)
+{
+    while (gpio_get_level(gpio)) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
 static void touch_task(void *pvParameters)
 {
-    uint8_t    btn;
-    TickType_t last_action[2] = {0, 0};
+    uint8_t btn;
 
     while (1) {
         if (xQueueReceive(s_touch_queue, &btn, portMAX_DELAY) != pdTRUE) continue;
         if (btn > 1) continue;
 
-        /* Ignore entirely if motor is already moving */
-        if (lock_motor_get_state(s_motor) == LOCK_STATE_MOVING) {
-            ESP_LOGI(TAG, "Touch ignored: motor busy");
-            continue;
-        }
+        /* ── Step 1: wait DUAL_PRESS_WINDOW_MS for a second button event ── */
+        uint8_t second_btn = 0xFF;
+        bool got_second = (xQueueReceive(s_touch_queue, &second_btn,
+                                         pdMS_TO_TICKS(DUAL_PRESS_WINDOW_MS)) == pdTRUE);
 
-        /* Short wait to catch simultaneous press of the other button */
-        vTaskDelay(pdMS_TO_TICKS(DUAL_PRESS_WINDOW_MS));
-
-        int open_lvl  = gpio_get_level(TOUCH_OPEN_GPIO);
-        int close_lvl = gpio_get_level(TOUCH_CLOSE_GPIO);
-
-        if (open_lvl && close_lvl) {
-            /* Both buttons held: wait 5 s keeping both pressed to confirm reset */
-            ESP_LOGI(TAG, "Both buttons held: keep for 5s for Zigbee reset...");
+        if (got_second && second_btn != btn && second_btn <= 1) {
+            /* ── Dual press: hold both for 5 s to confirm Zigbee reset ── */
+            ESP_LOGI(TAG, "Both buttons pressed: keep for 5s for Zigbee reset...");
             bool confirmed = true;
             for (int i = 0; i < 50; i++) {
                 vTaskDelay(pdMS_TO_TICKS(100));
@@ -86,26 +86,40 @@ static void touch_task(void *pvParameters)
             }
             if (confirmed) {
                 ESP_LOGI(TAG, "Confirmed: Zigbee factory reset");
-                xQueueReset(s_touch_queue);
                 zigbee_factory_reset();
             } else {
                 ESP_LOGI(TAG, "Dual-press released early: reset cancelled");
             }
-            /* Wait for release + debounce regardless */
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            /* Wait for both to be released, then drain the queue */
+            wait_for_release(TOUCH_OPEN_GPIO);
+            wait_for_release(TOUCH_CLOSE_GPIO);
             xQueueReset(s_touch_queue);
-            last_action[0] = last_action[1] = xTaskGetTickCount();
             continue;
         }
 
-        /* Per-button debounce */
-        TickType_t now = xTaskGetTickCount();
-        if ((now - last_action[btn]) < pdMS_TO_TICKS(DEBOUNCE_MS)) continue;
-        last_action[btn] = now;
+        /* ── Step 2: single press — confirm by holding HOLD_CONFIRM_MS total ──
+         * We already spent DUAL_PRESS_WINDOW_MS waiting; wait the remainder.  */
+        int btn_gpio = (btn == BTN_OPEN) ? TOUCH_OPEN_GPIO : TOUCH_CLOSE_GPIO;
+        vTaskDelay(pdMS_TO_TICKS(HOLD_CONFIRM_MS - DUAL_PRESS_WINDOW_MS));
 
-        bool open = (btn == BTN_OPEN);
-        ESP_LOGI(TAG, "Touch: %s", open ? "OPEN" : "CLOSE");
-        zigbee_motor_cmd_send(open);
+        if (!gpio_get_level(btn_gpio)) {
+            /* Released before HOLD_CONFIRM_MS: accidental touch, ignore */
+            xQueueReset(s_touch_queue);
+            continue;
+        }
+
+        /* ── Step 3: button confirmed held — fire action ── */
+        if (lock_motor_get_state(s_motor) == LOCK_STATE_MOVING) {
+            ESP_LOGI(TAG, "Touch ignored: motor busy");
+        } else {
+            bool open = (btn == BTN_OPEN);
+            ESP_LOGI(TAG, "Touch: %s", open ? "OPEN" : "CLOSE");
+            zigbee_motor_cmd_send(open);
+        }
+
+        /* ── Step 4: wait for release so holding never re-triggers ── */
+        wait_for_release(btn_gpio);
+        xQueueReset(s_touch_queue);
     }
 }
 
