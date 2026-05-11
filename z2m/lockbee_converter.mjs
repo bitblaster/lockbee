@@ -46,10 +46,13 @@ const definition = {
     model: 'LockBee-v1',
     vendor: 'LockBee',
     description: 'ESP32-H2 smart lock actuator (NEMA17 + TMC2209 + StallGuard)',
-    fromZigbee: [fz.lock],
+    fromZigbee: [],
     toZigbee: [tz.lock, tzUnlockWithTimeout],
     exposes: [
-        e.lock(),
+        /* No state reporting — no physical position sensor.
+         * Home Assistant will use optimistic mode (assumes state = last command). */
+        exposes.binary('state', ea.SET, 'LOCK', 'UNLOCK')
+            .withDescription('Lock or unlock the door'),
         exposes.numeric('unlock_with_timeout', ea.SET)
             .withValueMin(1)
             .withValueMax(3600)
