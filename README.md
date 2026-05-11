@@ -46,17 +46,17 @@ keeping the left side free for future use or clean PCB routing.
 
 | Signal | ESP32-H2 GPIO | SuperMini pin | Target |
 |---|:---:|:---:|---|
-| STEP | 9 | G9 | TMC2209 STEP |
-| DIR | 10 | G10 | TMC2209 DIR |
-| EN (active LOW) | 11 | G11 | TMC2209 EN |
-| UART TX | 12 | G12 | TMC2209 PDN_UART |
-| UART RX | 13 | G13 | TMC2209 PDN_UART (via 1 kΩ) |
-| DIAG | 14 | G14 | TMC2209 DIAG |
+| EN (active LOW) | 9 | G9 | TMC2209 EN |
+| DIAG | 10 | G10 | TMC2209 DIAG |
+| UART TX | 11 | G11 | TMC2209 PDN_UART (via 1 kΩ) |
+| UART RX | 12 | G12 | TMC2209 PDN_UART |
+| STEP | 13 | G13 | TMC2209 STEP |
+| DIR | 14 | G14 | TMC2209 DIR |
 | Touch OPEN | 5 | G5 | TTP223 module #1 output |
 | Touch CLOSE | 6 | G6 | TTP223 module #2 output |
 
 > **GPIO 9** doubles as the BOOT strapping pin, but causes no conflict because
-> STEP is driven by the ESP32 (output) into the TMC2209 high-impedance input —
+> EN is driven by the ESP32 (output) into the TMC2209 high-impedance input —
 > nothing pulls it LOW at boot.
 
 ### UART single-wire connection
@@ -65,9 +65,9 @@ The TMC2209 uses a single-wire half-duplex UART on PDN_UART.
 TX is connected directly to PDN_UART; RX is looped back through a **1 kΩ** resistor:
 
 ```
-ESP32 TX (G12) ──────────┬──── TMC2209 PDN_UART
+ESP32 TX (G11) ──[1kΩ]──┬──── TMC2209 PDN_UART
                          │
-ESP32 RX (G13) ──[1kΩ]──┘
+ESP32 RX (G12) ──────────┘
 ```
 
 The firmware flushes the 4-byte TX echo before reading the 8-byte reply.
@@ -84,8 +84,7 @@ The TMC2209 DIAG output is **push-pull** (per datasheet): no pull resistor requi
 14V DC ──┬──────────────────────────── TMC2209 VM (motor power)
          │
          └── Mini 560 buck ── 5V ──── ESP32-H2 5V pin
-                                  └── TMC2209 VIO
-                                        (ESP32 onboard LDO → 3.3V internally)
+                                        └── ESP32 onboard LDO → 3.3V pin ── TMC2209 VIO
 ```
 The buck converter outputs 5V rather than 3.3V to reduce output ripple through
 the ESP32's onboard LDO before reaching sensitive logic circuits.
@@ -173,7 +172,7 @@ the calibrated value is restored — no re-calibration needed after power cycle.
 
 ## Calibrated Parameters
 
-Measured on the actual lock with 2.54:1 gear reduction:
+Measured on the actual lock with 3.85:1 gear reduction:
 
 | Parameter | Value |
 |---|---|
@@ -182,7 +181,7 @@ Measured on the actual lock with 2.54:1 gear reduction:
 | StallGuard threshold (`SGTHRS`) | **100** |
 | `TCOOLTHRS` | **6 000** |
 | Microstep resolution | 16 |
-| IRUN | 31 |
+| IRUN | 16 |
 
 ---
 
@@ -225,8 +224,8 @@ compatible with Zigbee2MQTT and Home Assistant out of the box.
    auto-discovered.
 
 To re-pair (e.g. after replacing the coordinator): run `zb_reset` from the
-USB console. The device clears its stored network credentials and restarts
-the pairing scan.
+USB console, or hold both touch buttons for 5 seconds. The device clears its
+stored network credentials and restarts the pairing scan.
 
 ### Supported ZCL commands
 
@@ -322,6 +321,11 @@ ESP32 G6  ──── TTP223 #2 OUT  (CLOSE)
   to the shared motor command queue — the same queue used by Zigbee and
   console commands. All three sources are fully serialised; concurrent
   presses never cause a race condition.
+- **Busy guard:** if the motor is already moving, the touch event is silently
+  ignored. The in-progress command always completes before any new one starts.
+- **Zigbee factory reset:** holding **both** touch buttons simultaneously for
+  **5 seconds** triggers a Zigbee factory reset (equivalent to `zb_reset` on
+  the console). Releasing either button before 5 s cancels the action.
 - No software debounce is needed: the TTP223 chip integrates hardware
   debounce and outputs a clean digital signal.
 - After the motor move completes, the `LockState` ZCL attribute is updated

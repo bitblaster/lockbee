@@ -700,7 +700,7 @@ void app_main(void)
     }
 
     // Initialize TTP223 touch buttons (open=GPIO5, close=GPIO6)
-    ret = touch_init();
+    ret = touch_init(&g_motor);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Touch init failed: %s", esp_err_to_name(ret));
     }
