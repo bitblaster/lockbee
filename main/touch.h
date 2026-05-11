@@ -18,6 +18,14 @@ extern "C" {
  */
 esp_err_t touch_init(lock_motor_t *motor);
 
+/**
+ * @brief Enable or disable touch button actions.
+ *        When disabled, button presses are silently ignored.
+ *        Controlled via ZCL Door Lock attribute EnableOneTouchLocking (0x0029).
+ */
+void touch_set_enabled(bool enabled);
+bool touch_get_enabled(void);
+
 #ifdef __cplusplus
 }
 #endif

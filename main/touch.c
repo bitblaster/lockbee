@@ -41,6 +41,18 @@ static const char *TAG = "touch";
 
 static QueueHandle_t  s_touch_queue;
 static lock_motor_t  *s_motor;
+static volatile bool  s_touch_enabled = true;
+
+void touch_set_enabled(bool enabled)
+{
+    s_touch_enabled = enabled;
+    ESP_LOGI(TAG, "Touch buttons %s", enabled ? "ENABLED" : "DISABLED");
+}
+
+bool touch_get_enabled(void)
+{
+    return s_touch_enabled;
+}
 
 /* ─── ISR ───────────────────────────────────────────────────────────────── */
 
@@ -109,7 +121,9 @@ static void touch_task(void *pvParameters)
         }
 
         /* ── Step 3: button confirmed held — fire action ── */
-        if (lock_motor_get_state(s_motor) == LOCK_STATE_MOVING) {
+        if (!s_touch_enabled) {
+            ESP_LOGI(TAG, "Touch ignored: buttons disabled");
+        } else if (lock_motor_get_state(s_motor) == LOCK_STATE_MOVING) {
             ESP_LOGI(TAG, "Touch ignored: motor busy");
         } else {
             bool open = (btn == BTN_OPEN);

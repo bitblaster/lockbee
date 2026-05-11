@@ -17,9 +17,12 @@
  */
 
 #include "zigbee.h"
+#include "touch.h"
 
 #include <string.h>
 #include <stdint.h>
+#include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_ota_ops.h"
 #include "esp_zigbee_ota.h"
 
@@ -58,6 +61,12 @@ static const char *TAG = "zigbee";
 #define ZCL_LOCK_STATE_NOT_FULLY_LOCKED  0x00
 #define ZCL_LOCK_STATE_LOCKED            0x01
 #define ZCL_LOCK_STATE_UNLOCKED          0x02
+
+/* ZCL Door Lock — EnableOneTouchLocking attribute (boolean, R/W) */
+#define ZCL_ATTR_ENABLE_ONE_TOUCH_LOCKING  0x0029
+
+#define NVS_NAMESPACE       "lockbee"
+#define NVS_KEY_TOUCH_EN    "touch_en"
 
 /* ─── Motor command queue ───────────────────────────────────────────────── */
 
@@ -306,6 +315,21 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
         }
         break;
     }
+    case ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID: {
+        const esp_zb_zcl_set_attr_value_message_t *m = message;
+        if (m->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK &&
+            m->attribute.id == ZCL_ATTR_ENABLE_ONE_TOUCH_LOCKING) {
+            uint8_t val = *(uint8_t *)m->attribute.data.value;
+            touch_set_enabled(val != 0);
+            nvs_handle_t h;
+            if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+                nvs_set_u8(h, NVS_KEY_TOUCH_EN, val);
+                nvs_commit(h);
+                nvs_close(h);
+            }
+        }
+        break;
+    }
     case ESP_ZB_CORE_OTA_UPGRADE_VALUE_CB_ID:
         return zb_ota_cb(*(esp_zb_zcl_ota_upgrade_value_message_t *)message);
 
@@ -390,10 +414,23 @@ static void zb_task(void *pvParameters)
     esp_zb_door_lock_cfg_t lock_cfg = ESP_ZB_DEFAULT_DOOR_LOCK_CONFIG();
     esp_zb_ep_list_t *ep_list = esp_zb_door_lock_ep_create(DOOR_LOCK_ENDPOINT, &lock_cfg);
 
-    /* Add manufacturer / model info to the Basic cluster.
-     * ZCL CharacterString: first byte = length, followed by UTF-8 characters. */
     esp_zb_cluster_list_t *cluster_list =
         esp_zb_ep_list_get_ep(ep_list, DOOR_LOCK_ENDPOINT);
+
+    /* Add EnableOneTouchLocking (0x0029) to Door Lock cluster.
+     * Boolean R/W attribute — controls whether touch buttons are active. */
+    if (cluster_list) {
+        esp_zb_attribute_list_t *lock_cluster = esp_zb_cluster_list_get_cluster(
+            cluster_list, ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+        if (lock_cluster) {
+            static uint8_t touch_enabled_attr = 1; /* true = enabled */
+            esp_zb_door_lock_cluster_add_attr(lock_cluster,
+                ZCL_ATTR_ENABLE_ONE_TOUCH_LOCKING, &touch_enabled_attr);
+        }
+    }
+
+    /* Add manufacturer / model info to the Basic cluster.
+     * ZCL CharacterString: first byte = length, followed by UTF-8 characters. */
     if (cluster_list) {
         esp_zb_attribute_list_t *basic_cluster = esp_zb_cluster_list_get_cluster(
             cluster_list, ESP_ZB_ZCL_CLUSTER_ID_BASIC, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
@@ -478,6 +515,23 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
     case ESP_ZB_BDB_SIGNAL_DEVICE_FIRST_START:
     case ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT:
         if (err == ESP_OK) {
+            /* Restore touch-enabled state from NVS */
+            {
+                nvs_handle_t h;
+                if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+                    uint8_t val = 1;
+                    nvs_get_u8(h, NVS_KEY_TOUCH_EN, &val);
+                    nvs_close(h);
+                    touch_set_enabled(val != 0);
+                    /* Sync ZCL attribute to match NVS value */
+                    esp_zb_zcl_set_attribute_val(
+                        DOOR_LOCK_ENDPOINT,
+                        ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK,
+                        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                        ZCL_ATTR_ENABLE_ONE_TOUCH_LOCKING,
+                        &val, false);
+                }
+            }
             if (esp_zb_bdb_is_factory_new()) {
                 ESP_LOGI(TAG, "Factory-new device — starting network steering");
                 esp_zb_bdb_start_top_level_commissioning(
