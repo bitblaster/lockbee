@@ -41,13 +41,39 @@ const tzUnlockWithTimeout = {
     },
 };
 
+/*
+ * Custom converter for EnableOneTouchLocking (ZCL attribute 0x0029).
+ * Controls whether the physical touch buttons are active.
+ * Value is persisted in NVS on the device.
+ */
+const tzTouchEnabled = {
+    key: ['touch_enabled'],
+    convertSet: async (entity, key, value, meta) => {
+        await entity.write('closuresDoorLock', {enableOneTouchLocking: value ? 1 : 0});
+        return {state: {touch_enabled: value}};
+    },
+    convertGet: async (entity, key, meta) => {
+        await entity.read('closuresDoorLock', ['enableOneTouchLocking']);
+    },
+};
+
+const fzTouchEnabled = {
+    cluster: 'closuresDoorLock',
+    type: ['attributeReport', 'readResponse'],
+    convert: (model, msg, publish, options, meta) => {
+        if (msg.data.hasOwnProperty('enableOneTouchLocking')) {
+            return {touch_enabled: msg.data['enableOneTouchLocking'] === 1};
+        }
+    },
+};
+
 const definition = {
     zigbeeModel: ['LockBee-v1'],
     model: 'LockBee-v1',
     vendor: 'LockBee',
     description: 'ESP32-H2 smart lock actuator (NEMA17 + TMC2209 + StallGuard)',
-    fromZigbee: [],
-    toZigbee: [tz.lock, tzUnlockWithTimeout],
+    fromZigbee: [fzTouchEnabled],
+    toZigbee: [tz.lock, tzUnlockWithTimeout, tzTouchEnabled],
     exposes: [
         /* No state reporting — no physical position sensor.
          * Home Assistant will use optimistic mode (assumes state = last command). */
@@ -58,6 +84,8 @@ const definition = {
             .withValueMax(3600)
             .withUnit('s')
             .withDescription('Unlock and automatically re-lock after N seconds (1–3600)'),
+        exposes.binary('touch_enabled', ea.ALL, true, false)
+            .withDescription('Enable or disable the physical touch buttons'),
     ],
 };
 
