@@ -52,8 +52,8 @@ keeping the left side free for future use or clean PCB routing.
 | UART RX | 12 | G12 | TMC2209 PDN_UART |
 | STEP | 13 | G13 | TMC2209 STEP |
 | DIR | 14 | G14 | TMC2209 DIR |
-| Touch OPEN | 5 | G5 | TTP223 module #1 output |
-| Touch CLOSE | 6 | G6 | TTP223 module #2 output |
+| Touch OPEN | 4 | G4 | TTP223 module #1 output |
+| Touch CLOSE | 5 | G5 | TTP223 module #2 output |
 
 > **GPIO 9** doubles as the BOOT strapping pin, but causes no conflict because
 > EN is driven by the ESP32 (output) into the TMC2209 high-impedance input —
@@ -167,6 +167,7 @@ the calibrated value is restored — no re-calibration needed after power cycle.
 | `irun` | u8 | TMC2209 run current scale |
 | `ihold` | u8 | TMC2209 hold current scale |
 | `lock_steps` | u32 | Calibrated stroke in microsteps |
+| `touch_en` | u8 | Touch buttons enabled (1) or disabled (0) |
 
 ---
 
@@ -235,6 +236,13 @@ stored network credentials and restarts the pairing scan.
 | Unlock Door | 0x01 | Motor moves to unlocked position |
 | Unlock with Timeout | 0x03 | Motor unlocks, then re-locks after N seconds |
 
+### Supported ZCL attributes (writable)
+
+| Attribute | Cluster | ID | Type | Description |
+|---|:---:|:---:|:---:|---|
+| LockState | 0x0101 | 0x0000 | uint8 | Current lock state (reported after each move) |
+| EnableOneTouchLocking | 0x0101 | 0x0029 | bool | Enable/disable physical touch buttons |
+
 **UnlockWithTimeout** is handled entirely in firmware — no automation on the
 HA side is required. The timeout (uint16, seconds) is encoded in the ZCL
 payload. If a new command arrives before the timer expires, the pending
@@ -297,8 +305,8 @@ any network dependency:
 
 | Module | GPIO | Action |
 |---|:---:|---|
-| Touch OPEN | G5 | Unlocks the door (same as `open` console command) |
-| Touch CLOSE | G6 | Locks the door (same as `close` console command) |
+| Touch OPEN | G4 | Unlocks the door (same as `open` console command) |
+| Touch CLOSE | G5 | Locks the door (same as `close` console command) |
 
 ### Wiring
 
@@ -309,27 +317,30 @@ resistor needed:
 ```
 ESP32 3V3 ──── TTP223 VCC
 ESP32 GND ──── TTP223 GND
-ESP32 G5  ──── TTP223 #1 OUT  (OPEN)
-ESP32 G6  ──── TTP223 #2 OUT  (CLOSE)
+ESP32 G4  ──── TTP223 #1 OUT  (OPEN)
+ESP32 G5  ──── TTP223 #2 OUT  (CLOSE)
 ```
 
 ### Firmware behaviour
 
-- A **rising-edge GPIO ISR** fires on each touch and posts the button index
-  to a FreeRTOS queue.
-- `touch_task` reads the queue and calls `zigbee_motor_cmd_send()`, posting
-  to the shared motor command queue — the same queue used by Zigbee and
-  console commands. All three sources are fully serialised; concurrent
-  presses never cause a race condition.
+- A **rising-edge GPIO ISR** fires on touch and posts the button index to a
+  FreeRTOS queue.
+- **Hold-to-confirm (500 ms):** the button must be held for 500 ms before the
+  action fires. A touch shorter than 500 ms is silently discarded as accidental.
+- **No re-trigger while held:** after the action fires the task waits for the
+  button to be released before accepting new events.
 - **Busy guard:** if the motor is already moving, the touch event is silently
-  ignored. The in-progress command always completes before any new one starts.
-- **Zigbee factory reset:** holding **both** touch buttons simultaneously for
-  **5 seconds** triggers a Zigbee factory reset (equivalent to `zb_reset` on
-  the console). Releasing either button before 5 s cancels the action.
-- No software debounce is needed: the TTP223 chip integrates hardware
-  debounce and outputs a clean digital signal.
-- After the motor move completes, the `LockState` ZCL attribute is updated
-  just as it would be for any other command source.
+  ignored.
+- **Dual-press detection** uses the queue (not `gpio_get_level`), making it
+  robust against TTP223 modules in toggle mode.
+- **Zigbee factory reset:** pressing **both** buttons within 100 ms, then
+  holding both for **5 seconds**, triggers a Zigbee factory reset (equivalent
+  to `zb_reset` on the console). Releasing either button before 5 s cancels.
+- **Enable/disable via Zigbee:** the `EnableOneTouchLocking` ZCL attribute
+  (cluster 0x0101, attribute 0x0029) enables or disables touch button actions
+  remotely. The setting is persisted in NVS and survives reboots.
+- All motor commands are serialised through the shared `motor_cmd_queue` —
+  touch, Zigbee, and console commands never race.
 
 ---
 
@@ -474,7 +485,19 @@ of 100 µs/step, `TSTEP ≈ 1200` clock ticks. StallGuard only activates when
 `TCOOLTHRS ≥ TSTEP`, so values below 1200 disable it entirely.
 **Solution:** `TCOOLTHRS = 6000` (5× safety margin over TSTEP).
 
-### 4. No .gitignore — build artifacts staged
+### 5. Zigbee crash — `vPortExitCritical` assert after motor move
+
+After every motor move the firmware called `esp_zb_scheduler_user_alarm()`
+from `motor_task` (a non-Zigbee task) without holding the ZBOSS global lock.
+During network steering, the ZBOSS kernel had an active critical section at the
+same time, causing an unbalanced `zb_osif_enable_all_interrupts` call →
+`assert failed: vPortExitCritical port.c:618 (port_uxCriticalNesting[0] > 0)`.
+**Fix:** wrap every `esp_zb_scheduler_user_alarm()` call from non-ZB tasks with
+`esp_zb_lock_acquire(portMAX_DELAY)` / `esp_zb_lock_release()`. Calls that
+originate inside the ZB task (e.g. from `esp_zb_app_signal_handler`) must
+invoke the callback directly to avoid deadlock.
+
+### 6. No .gitignore — build artifacts staged
 The ESP-IDF `build/` directory contains hundreds of compiled objects and binaries.
 **Solution:** `.gitignore` added to exclude `build/`, `sdkconfig`, and `sdkconfig.old`.
 

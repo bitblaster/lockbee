@@ -51,7 +51,7 @@ menu "LockBee Configuration"
         config LOCKBEE_TOUCH_OPEN_GPIO
             int "TTP223 touch button OPEN GPIO"
             range 0 30
-            default 5
+            default 4
             help
                 GPIO connected to the TTP223 module for the OPEN (unlock) button.
                 TTP223 output is push-pull active HIGH — no external pull needed.
@@ -59,7 +59,7 @@ menu "LockBee Configuration"
         config LOCKBEE_TOUCH_CLOSE_GPIO
             int "TTP223 touch button CLOSE GPIO"
             range 0 30
-            default 4
+            default 5
             help
                 GPIO connected to the TTP223 module for the CLOSE (lock) button.
                 TTP223 output is push-pull active HIGH — no external pull needed.
